@@ -1,4 +1,4 @@
 @font-face {
-    font-family: "X";
-    src: url("javascript:eval(atob('YWxlcnQoMSk='))");
+    font-family: X;
+    src: url("javascript:alert(1)");
 }
